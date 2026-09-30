@@ -1,0 +1,18 @@
+# Environment variables - klucz API powinien zostać tajny!
+.env
+
+# Środowisko wirtualne Python
+.venv/
+venv/
+__pycache__/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cache
+*.pyc
+*.pyo
+*/__pycache__/
