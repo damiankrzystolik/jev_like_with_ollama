@@ -1,88 +1,212 @@
 # Krok 3: Zadawanie trzech różnych typów pytań naraz
-# Ten skrypt demonstruje moc Jev - można jednocześnie prosić o:
-# 1. Noul (pytanie tak/nie) - czy ktoś potrzebuje pomocy?
-# 2. Choice (wybór z opcji) - dokąd skierować wizytującego?
-# 3. Score (ocena na skali) - jak pilna jest sprawa?
+# Ten skrypt demonstruje moc Jev/Ollama - można jednocześnie prosić o:
+# 1. Choice (wybór z opcji) - dokąd skierować wizytującego?
+# 2. Score (ocena na skali) - jak pilna jest sprawa?
+# 3. Noul (pytanie tak/nie) - czy ktoś potrzebuje pomocy?
+#
+# Ta wersja używa LOKALNEGO Ollama zamiast OpenRouter API.
+# Wymaga: Ollama v0.35.0+ z zainstalowanym modelem (np. ollama pull tev1:0.8b)
 
-import os
+import requests
+import json
 from pprint import pprint
-from typesafe_sdk import Choice, Noul, Score, TypeSafeClient
 
-# Inicjalizacja klienta Jev
-client = TypeSafeClient(
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api",
-)
+# Konfiguracja lokalnego Ollama
+OLLAMA_URL = "http://localhost:11434/v1/systemone"
+MODEL_NAME = "tev1:0.8b"
 
-# QUESTIONS - zdefiniuj wszystkie pytania, które chcesz zadać
-# Wszystkie są wysyłane w jednym żądaniu, co jest bardziej efektywne niż
-# wysyłanie kilku żądań osobno.
-QUESTIONS = {
-    # Choice - Jev wybiera jedną z podanych opcji
-    # Wymaga "instructions" (co zrobić?) i "criteria" (słownik opcji)
-    "desk": Choice(
-        instructions="Where should the info desk send the visitor?",
-        criteria={
-            "ticket_counter": "Buying, changing, or refunding tickets.",
-            "lost_and_found": "Looking for something they lost.",
-            "immediate_help": "An emergency, an injury, or a missing person.",
+
+def format_results(response_data):
+    """
+    Formatuje i wyodrębnia wyniki z odpowiedzi Ollama.
+
+    Args:
+        response_data: dict z JSON odpowiedzi od Ollama
+
+    Returns:
+        dict z wyodrębnionym wynikami
+    """
+    answers = response_data["answers"]
+
+    # === WYODRĘBNIANIE WYNIKÓW ===
+    # Każdy typ pytania zwraca inne pola:
+
+    # Choice - zawiera "choice" (najprawdopodobniejsza opcja)
+    # i "probabilities" (szanse dla każdej opcji)
+    desk_result = answers["desk"]
+    desk_choice = desk_result["choice"]
+    desk_confidence = desk_result["confidence"]
+    desk_probs = desk_result["probabilities"]
+
+    # Score - zawiera "score" (średnia ważona na skali)
+    # i "legend" (mapowanie indeksów na opisy)
+    urgency_result = answers["urgency"]
+    urgency_score = urgency_result["score"]
+    urgency_confidence = urgency_result["confidence"]
+
+    # Noul - zawiera "noul" (prawdopodobieństwo "true")
+    # wartość 0-1 gdzie 1 = zdecydowane "tak", 0 = zdecydowane "nie"
+    assistance_result = answers["needs_assistance"]
+    assistance_prob = assistance_result["noul"]
+
+    return {
+        "desk": {
+            "choice": desk_choice,
+            "confidence": desk_confidence,
+            "probabilities": desk_probs,
         },
-    ),
-
-    # Score - Jev ocenia czymś na uporządkowanej skali
-    # Wymaga "instructions" i "criteria" (lista od najniższej do najwyższej)
-    # Wynik zwracany jako float - średnia ważona pozycji na skali
-    "urgency": Score(
-        instructions="How urgent is the request of the visitor?",
-        criteria=[
-            "Not urgent at all.",                                    # 0
-            "Should be handled today.",                             # 1
-            "Should be handled within the next few minutes.",       # 2
-            "Needs to be handled right now.",                       # 3
-        ],
-    ),
-
-    # Noul - pytanie tak/nie
-    # Zmienna pomocnicza - czy wizytujący potrzebuje asysty?
-    "needs_assistance": Noul(
-        instructions=(
-            "Does the visitor need a staff member to help them get around "
-            "the station, for example because of a wheelchair, heavy "
-            "luggage, or small children?"
-        ),
-    ),
-}
+        "urgency": {
+            "score": urgency_score,
+            "confidence": urgency_confidence,
+            "max_score": len(urgency_result["legend"]) - 1,
+        },
+        "needs_assistance": {
+            "probability": assistance_prob,
+            "answer": "Yes" if assistance_prob > 0.5 else "No",
+        },
+    }
 
 
 def main():
     """
-    Główna funkcja - pobiera polecenie od wizytującego i wysyła do Jev.
+    Główna funkcja - pobiera sformułowanie od wizytującego i wysyła do Ollama.
     """
+    print(f"🤖 Używam modelu: {MODEL_NAME}")
+    print(f"🌐 Endpoint: {OLLAMA_URL}\n")
+
     # Pobierz naturalne sformułowanie od użytkownika
     visitor_says = input("What does the visitor say? ")
 
-    # client.system_one() - wyślij stan i wszystkie pytania naraz
-    # state: słownik z "visitor_says" - możemy się do niego odwołać w instrukcjach
-    # questions: wszystkie pytania z QUESTIONS
-    r = client.system_one(
-        state={"visitor_says": visitor_says},
-        questions=QUESTIONS,
-    )
+    try:
+        # === PRZYGOTOWANIE ŻĄDANIA ===
+        request_payload = {
+            # Model do użycia
+            "model": MODEL_NAME,
 
-    # Wydrukuj wyniki w czytelnym formacie
-    # r.model_dump() konwertuje odpowiedź do słownika Python
-    print("\n=== Jev Response ===")
-    pprint(r.model_dump()["answers"])
+            # State - treść do analizy
+            # Tutaj: słownik z kluczem "visitor_says"
+            # Model może się do niego odwołać w instrukcjach
+            "state": {"visitor_says": visitor_says},
 
-    # Możesz też dostęp do poszczególnych wartości:
-    print("\n=== Parsed Results ===")
-    desk_choice = r.answers["desk"].choice
-    urgency_score = r.answers["urgency"].score
-    needs_help = r.answers["needs_assistance"].noul
+            # Questions - TRZY PYTANIA NARAZ
+            # Wszystkie są wysyłane w jednym żądaniu, co jest bardziej efektywne
+            # niż wysyłanie kilku żądań osobno
+            "questions": {
+                # === PYTANIE 1: CHOICE - WYBÓR Z OPCJI ===
+                "desk": {
+                    "type": "choice",
 
-    print(f"Send to: {desk_choice}")
-    print(f"Urgency level: {urgency_score:.2f}/3")
-    print(f"Needs assistance: {'Yes' if needs_help > 0.5 else 'No'}")
+                    # Instrukcja dla modelu
+                    "instructions": "Where should the info desk send the visitor?",
+
+                    # Criteria - słownik opcji z opisami
+                    # Klucze: identyfikatory opcji
+                    # Wartości: opisy opcji (pomocne dla modelu)
+                    "criteria": {
+                        "ticket_counter": "Buying, changing, or refunding tickets.",
+                        "lost_and_found": "Looking for something they lost.",
+                        "immediate_help": "An emergency, an injury, or a missing person.",
+                    }
+                },
+
+                # === PYTANIE 2: SCORE - OCENA NA SKALI ===
+                "urgency": {
+                    "type": "score",
+
+                    "instructions": "How urgent is the request of the visitor?",
+
+                    # Criteria - LISTA od najniższej do najwyższej oceny
+                    # Indeks = wartość (0, 1, 2, 3)
+                    # Model zwróci średnią ważoną tych indeksów
+                    "criteria": [
+                        "Not urgent at all.",                              # 0
+                        "Should be handled today.",                        # 1
+                        "Should be handled within the next few minutes.",  # 2
+                        "Needs to be handled right now.",                  # 3
+                    ]
+                },
+
+                # === PYTANIE 3: NOUL - TAK/NIE ===
+                "needs_assistance": {
+                    "type": "noul",
+
+                    "instructions": (
+                        "Does the visitor need a staff member to help them get around "
+                        "the station, for example because of a wheelchair, heavy "
+                        "luggage, or small children?"
+                    ),
+
+                    # Criteria - opcjonalne dla noul
+                    # Wyjaśnia co oznacza false i true
+                    "criteria": {
+                        "false": "Visitor does not need physical assistance",
+                        "true": "Visitor needs staff to help them"
+                    }
+                },
+            }
+        }
+
+        # === WYSŁANIE ŻĄDANIA ===
+        print("📤 Wysyłam żądanie do Ollama...\n")
+
+        response = requests.post(
+            OLLAMA_URL,
+            json=request_payload,
+            timeout=30
+        )
+
+        # Sprawdzenie czy request się powiódł
+        if response.status_code != 200:
+            print(f"❌ Błąd Ollama ({response.status_code})")
+            print(response.text)
+            return
+
+        # === PRZETWARZANIE ODPOWIEDZI ===
+        result = response.json()
+
+        print("✅ Otrzymana odpowiedź\n")
+
+        # === WYŚWIETLENIE SUROWEJ ODPOWIEDZI ===
+        print("=== Raw Ollama Response ===")
+        pprint(result["answers"])
+
+        # === WYŚWIETLENIE SFORMATOWANYCH WYNIKÓW ===
+        parsed = format_results(result)
+
+        print("\n=== Parsed Results ===")
+
+        # Rezultaty pytania Choice
+        print(f"\n🏪 Desk (Choice):")
+        print(f"   Decision: {parsed['desk']['choice']}")
+        print(f"   Confidence: {parsed['desk']['confidence']:.1%}")
+        print(f"   All options:")
+        for option, prob in parsed['desk']['probabilities'].items():
+            print(f"     - {option}: {prob:.1%}")
+
+        # Rezultaty pytania Score
+        print(f"\n⏰ Urgency (Score):")
+        max_score = parsed['urgency']['max_score']
+        current_score = parsed['urgency']['score']
+        print(f"   Score: {current_score:.2f}/{max_score}")
+        print(f"   Confidence: {parsed['urgency']['confidence']:.1%}")
+
+        # Rezultaty pytania Noul
+        print(f"\n🆘 Needs Assistance (Noul):")
+        print(f"   Answer: {parsed['needs_assistance']['answer']}")
+        print(f"   Probability: {parsed['needs_assistance']['probability']:.1%}")
+
+        # === STATYSTYKI ===
+        print(f"\n📊 Token Usage:")
+        print(f"   Input: {result['usage']['input_tokens']}")
+        print(f"   Output: {result['usage']['output_tokens']}")
+
+    except requests.exceptions.ConnectionError:
+        print("❌ Nie mogę połączyć się z Ollamą.")
+        print("   Uruchom: ollama serve")
+    except requests.exceptions.Timeout:
+        print("❌ Timeout - Ollama odpowiada zbyt długo")
+    except Exception as e:
+        print(f"❌ Błąd: {e}")
 
 
 if __name__ == "__main__":
